@@ -1,3 +1,4 @@
+#Configure AWS provider and initialize remote backend
 terraform {
   required_providers {
     aws = {
@@ -18,6 +19,7 @@ provider "aws" {
   region = "us-east-1"
 }
 
+#Create a VPC
 data "aws_availability_zones" "available" {}
 
 module "vpc" {
@@ -33,6 +35,7 @@ module "vpc" {
   enable_dns_hostnames = true
 }
 
+#Create security groups
 resource "aws_security_group" "cluster" {
   name_prefix = var.cluster_name
   description = "EKS cluster security group."
@@ -140,4 +143,46 @@ resource "aws_security_group_rule" "cluster_primary_ingress_workers" {
   from_port                = 0
   to_port                  = 65535
   type                     = "ingress"
+}
+
+#Create IAM roles
+resource "aws_iam_role" "cluster" {
+  name_prefix           = var.cluster_name
+  
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "eks.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": "EKSClusterAssumeRole"
+    }
+  ]
+}
+EOF
+}
+
+data "aws_partition" "current" {}
+
+locals {
+  policy_arn_prefix = "arn:${data.aws_partition.current.partition}:iam::aws:policy"
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSClusterPolicy" {
+  policy_arn = "${local.policy_arn_prefix}/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.cluster.name
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSServicePolicy" {
+  policy_arn = "${local.policy_arn_prefix}/AmazonEKSServicePolicy"
+  role       = aws_iam_role.cluster.name
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSVPCResourceControllerPolicy" {
+  policy_arn = "${local.policy_arn_prefix}/AmazonEKSVPCResourceController"
+  role       = aws_iam_role.cluster.name
 }
