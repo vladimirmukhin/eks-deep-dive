@@ -33,6 +33,14 @@ module "vpc" {
   enable_nat_gateway   = true
   single_nat_gateway   = true
   enable_dns_hostnames = true
+
+  public_subnet_tags = {
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+  }
+
+  private_subnet_tags = {
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+  }
 }
 
 #Create security groups
@@ -148,22 +156,17 @@ resource "aws_security_group_rule" "cluster_primary_ingress_workers" {
 #Create IAM roles
 resource "aws_iam_role" "cluster" {
   name_prefix           = var.cluster_name
-  
-  assume_role_policy = <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Action": "sts:AssumeRole",
-      "Principal": {
-        "Service": "eks.amazonaws.com"
-      },
-      "Effect": "Allow",
-      "Sid": "EKSClusterAssumeRole"
-    }
-  ]
-}
-EOF
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "eks.amazonaws.com"
+      }
+    }]
+    Version = "2012-10-17"
+  })
 }
 
 data "aws_partition" "current" {}
@@ -185,4 +188,78 @@ resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSServicePolicy" {
 resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSVPCResourceControllerPolicy" {
   policy_arn = "${local.policy_arn_prefix}/AmazonEKSVPCResourceController"
   role       = aws_iam_role.cluster.name
+}
+
+resource "aws_iam_role" "workers" {
+  name = "${var.cluster_name}-workers"
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+    Version = "2012-10-17"
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "workers-AmazonEKSWorkerNodePolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.workers.name
+}
+
+resource "aws_iam_role_policy_attachment" "workers-AmazonEKS_CNI_Policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.workers.name
+}
+
+resource "aws_iam_role_policy_attachment" "workers-AmazonEC2ContainerRegistryReadOnly" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.workers.name
+}
+
+#Create EKS cluster
+resource "aws_eks_cluster" "this" {
+  name                      = var.cluster_name
+  role_arn                  = aws_iam_role.cluster.arn
+
+  vpc_config {
+    security_group_ids      = compact([aws_security_group.cluster.id])
+    subnet_ids              = module.vpc.private_subnets
+    
+    endpoint_public_access  = true
+    endpoint_private_access = true
+    public_access_cidrs     = ["73.126.49.102/32"]
+  }
+
+  depends_on = [
+    aws_security_group_rule.cluster_egress_internet,
+    aws_security_group_rule.cluster_https_worker_ingress,
+    aws_iam_role_policy_attachment.cluster_AmazonEKSClusterPolicy,
+    aws_iam_role_policy_attachment.cluster_AmazonEKSServicePolicy,
+    aws_iam_role_policy_attachment.cluster_AmazonEKSVPCResourceControllerPolicy,
+  ]
+}
+
+resource "aws_eks_node_group" "workers" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "${var.cluster_name}-workers"
+  node_role_arn   = aws_iam_role.workers.arn
+  subnet_ids      = module.vpc.private_subnets
+
+  scaling_config {
+    desired_size = 3
+    max_size     = 3
+    min_size     = 3
+  }
+
+  # Ensure that IAM Role permissions are created before and deleted after EKS Node Group handling.
+  # Otherwise, EKS will not be able to properly delete EC2 Instances and Elastic Network Interfaces.
+  depends_on = [
+    aws_iam_role_policy_attachment.workers-AmazonEKSWorkerNodePolicy,
+    aws_iam_role_policy_attachment.workers-AmazonEKS_CNI_Policy,
+    aws_iam_role_policy_attachment.workers-AmazonEC2ContainerRegistryReadOnly,
+  ]
 }
