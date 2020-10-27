@@ -1,1 +1,1 @@
-cluster_name = "EksA"
+cluster_name = "eks-sandbox"
